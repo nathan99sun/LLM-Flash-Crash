@@ -1,0 +1,33 @@
+import gymnasium as gym
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_checker import check_env
+
+# 1. Initialize your custom environment (The "Rules")
+# (Assuming RLMarketMaker is defined as a proper gym.Env as in Appendix A)
+env = RLMarketMaker(risk_aversion=0.01, inventory_limit=100)
+
+# Validate that the environment complies with Gymnasium standards
+check_env(env)
+
+# 2. Initialize the PPO Agent (The "Brain")
+# This is where the multi-step optimization math actually lives.
+# 'MlpPolicy' creates the Actor-Critic Multi-Layer Perceptron neural networks.
+# 'gamma=0.99' is the discount factor for expected future utility.
+model = PPO(
+    "MlpPolicy", 
+    env, 
+    gamma=0.99,            # Discount factor for future rewards
+    learning_rate=0.0003,  # Step size for the policy update
+    n_steps=2048,          # The trading horizon T before updating the policy
+    ent_coef=0.01,         # Encourages exploration of the action space
+    verbose=1
+)
+
+# 3. Train the Agent
+# The agent will play through the environment, experiencing the inventory 
+# penalties, and update its optimal policy (\pi*) via gradient ascent.
+print("Training the RL Market Maker...")
+model.learn(total_timesteps=100000)
+
+# 4. Save the trained policy weights
+model.save("ppo_market_maker_v1")
