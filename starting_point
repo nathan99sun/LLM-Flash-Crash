@@ -1,0 +1,198 @@
+import numpy as np
+import random
+from transformers import pipeline
+
+# ==========================================
+# MODULE A: The Limit Order Book (LOB) Engine
+# ==========================================
+class LimitOrderBook:
+    """A simplified matching engine for the simulation."""
+    def __init__(self):
+        self.mid_price = 100.00
+        self.bids = []  # In a full simulation, this would be a sorted tree
+        self.asks = []
+        
+    def submit_order(self, order):
+        """Accepts dictionary orders and returns simulated executions."""
+        executions = []
+        
+        # Simulate price impact of aggressive market orders sweeping the book
+        if order['type'] == 'MARKET':
+            impact = (order['qty'] * 0.005) # Simulated market impact
+            if order['side'] == 'sell':
+                self.mid_price -= impact
+                executions.append({'side': 'buy', 'price': self.mid_price, 'qty': order['qty']})
+            elif order['side'] == 'buy':
+                self.mid_price += impact
+                executions.append({'side': 'sell', 'price': self.mid_price, 'qty': order['qty']})
+                
+        return executions
+
+    def cancel_all_bids(self):
+        """Triggered by RL Market Makers during a flash crash."""
+        self.bids = []
+
+# ==========================================
+# MODULE B: Noise Traders (Baseline Liquidity)
+# ==========================================
+class NoiseTrader:
+    """Traditional stochastic agent to provide baseline volume."""
+    def __init__(self, agent_id, arrival_rate=0.20):
+        self.agent_id = agent_id
+        self.arrival_rate = arrival_rate
+
+    def step(self, mid_price):
+        """Generates random baseline orders to keep the market moving."""
+        if random.random() > self.arrival_rate:
+            return None 
+            
+        side = 'buy' if random.random() < 0.5 else 'sell'
+        qty = random.randint(10, 100)
+        
+        return {
+            "agent_id": self.agent_id,
+            "type": "MARKET", # Using market orders to simulate volume taking
+            "side": side,
+            "qty": qty
+        }
+
+# ==========================================
+# MODULE C: RL Market Makers (Liquidity Providers)
+# ==========================================
+class RLMarketMaker:
+    """Continuous market maker with severe inventory penalties."""
+    def __init__(self, agent_id, risk_aversion=0.01, inventory_limit=100):
+        self.agent_id = agent_id
+        self.phi = risk_aversion  
+        self.max_inventory = inventory_limit
+        self.cash = 100000.0
+        self.inventory = 0
+        self.mid_price = 100.00
+
+    def step(self, executions, new_mid_price, current_volatility):
+        """Updates inventory and calculates reward based on Avellaneda-Stoikov math."""
+        prev_portfolio_value = self.cash + (self.inventory * self.mid_price)
+
+        for trade in executions:
+            if trade['side'] == 'buy':
+                self.inventory += trade['qty']
+                self.cash -= (trade['price'] * trade['qty'])
+            elif trade['side'] == 'sell':
+                self.inventory -= trade['qty']
+                self.cash += (trade['price'] * trade['qty'])
+
+        self.mid_price = new_mid_price
+        new_portfolio_value = self.cash + (self.inventory * self.mid_price)
+        step_pnl = new_portfolio_value - prev_portfolio_value
+
+        # The mathematical catalyst for the flash crash
+        inventory_penalty = self.phi * current_volatility * (self.inventory ** 2)
+        breach_penalty = 500 if abs(self.inventory) > self.max_inventory else 0
+
+        reward = step_pnl - inventory_penalty - breach_penalty
+        return reward
+
+# ==========================================
+# MODULE D: FinBERT Agents (News Traders)
+# ==========================================
+class FinBERTAgent:
+    """Autonomous agent powered by ProsusAI/finbert."""
+    def __init__(self, agent_id):
+        self.agent_id = agent_id
+        # Load the pre-trained financial NLP model
+        self.nlp = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+
+    def analyze_news_and_trade(self, news_headline, base_qty=100):
+        """Passes text to FinBERT and outputs a structured LOB order."""
+        result = self.nlp(news_headline)[0]
+        sentiment = result['label']
+        confidence = result['score']
+        
+        print(f"[{self.agent_id}] FinBERT Output: {sentiment.upper()} (Confidence: {confidence:.2f})")
+        
+        action = None
+        if sentiment == "positive" and confidence > 0.60:
+            action = "buy"
+        elif sentiment == "negative" and confidence > 0.60:
+            action = "sell"
+            
+        if action:
+            # Scale quantity based on model confidence
+            qty = int(base_qty * confidence)
+            return {
+                "agent_id": self.agent_id,
+                "type": "MARKET",
+                "side": action,
+                "qty": qty
+            }
+        return None
+
+# ==========================================
+# MODULE E: The Simulation Loop
+# ==========================================
+def run_simulation():
+    print("Initializing Multi-Agent Autonomous Market (MAAM)...")
+    print("Loading FinBERT models (this may take a moment)...\n")
+    
+    matching_engine = LimitOrderBook()
+    
+    # Initialize our 3 types of agents
+    noise_traders = [NoiseTrader(f"Noise_{i}") for i in range(10)]
+    rl_makers = [RLMarketMaker(f"RL_{i}") for i in range(20)]
+    finbert_traders = [FinBERTAgent(f"FinBERT_{i}") for i in range(5)] # 5 identical agents
+    
+    current_volatility = 0.02
+    
+    print("--- REGIME 1: STATIONARY MARKET (Ticks 1-5) ---")
+    for tick in range(1, 6):
+        # Noise traders provide baseline volume
+        for nt in noise_traders:
+            order = nt.step(matching_engine.mid_price)
+            if order:
+                matching_engine.submit_order(order)
+        print(f"Tick {tick}: Normal trading. Mid-Price: ${matching_engine.mid_price:.2f}")
+        
+    print(f"\nCurrent LOB Mid-Price: ${matching_engine.mid_price:.2f}")
+    
+    print("\n--- REGIME 2: THE EXOGENOUS SHOCK ---")
+    headline = "The Federal Reserve unexpectedly hiked interest rates by 50 basis points, citing persistent, entrenched inflation. Equity markets expected to face severe headwinds."
+    print(f"BREAKING NEWS: {headline}\n")
+    
+    # FinBERT Agents process the news
+    toxic_orders = []
+    for f_agent in finbert_traders:
+        order = f_agent.analyze_news_and_trade(headline)
+        if order:
+            toxic_orders.append(order)
+            
+    print("\n--- REGIME 3: AGENTIC CONTAGION ---")
+    # Execute the massive wave of toxic FinBERT market orders
+    toxic_executions = []
+    for order in toxic_orders:
+        executions = matching_engine.submit_order(order)
+        toxic_executions.extend(executions)
+        
+    print(f"Matching Engine processes {sum([o['qty'] for o in toxic_orders])} shares of toxic MARKET SELL orders.")
+    
+    # RL Agents process the incoming volume and calculate their inventory risk
+    current_volatility = 1.50 # Volatility suddenly spikes
+    flash_crash_triggered = False
+    
+    for rl in rl_makers:
+        # RL agents are forced to absorb the FinBERT sell flow (acting as buyers)
+        reward = rl.step(toxic_executions, matching_engine.mid_price, current_volatility)
+        
+        # If the Avellaneda-Stoikov penalty blows up, they abandon market making
+        if reward < -200:
+            flash_crash_triggered = True
+
+    if flash_crash_triggered:
+        matching_engine.cancel_all_bids()
+        print("\n[CRITICAL EVENT] RL Market Makers detected catastrophic inventory risk.")
+        print("-> Action: ALL RL AGENTS CANCELLED BIDS SIMULTaneously.")
+        
+    print(f"\nFinal LOB Mid-Price Post-Crash: ${matching_engine.mid_price:.2f}")
+    print("Shadow Flash Crash Simulation Complete.")
+
+if __name__ == "__main__":
+    run_simulation()
