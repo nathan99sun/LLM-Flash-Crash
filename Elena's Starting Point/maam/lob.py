@@ -101,6 +101,10 @@ class LimitOrderBook:
     # Public API
     # ------------------------------------------------------------------
 
+    def get_tick(self) -> int:
+        """Return the current simulation tick."""
+        return self._current_tick
+
     def set_tick(self, tick: int):
         self._current_tick = tick
 

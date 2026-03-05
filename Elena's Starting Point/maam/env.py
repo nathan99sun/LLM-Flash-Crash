@@ -21,6 +21,7 @@ The gym.Env version is preserved below (commented out) for future RL work.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -29,9 +30,10 @@ from maam.config import MAAMConfig
 from maam.lob import LimitOrderBook, Order, Side, OrderType
 from maam.agents.noise_trader import NoiseTraderPool
 from maam.agents.finbert_agent import FinBERTAgentPool
-from maam.agents.rl_market_maker import (
-    RLMarketMaker,
-    MarketMakerState,
+from maam.agents.smart_trader import (
+    SmartTrader,
+    SmartTraderConfig,
+    TraderState,
     QuoteAction,
 )
 
@@ -69,17 +71,20 @@ class FlashCrashSimulation:
         self._num_finbert_agents = num_finbert_agents
         self._base_volatility = base_volatility
 
-        self._mm_config = self._config.rl_market_maker
+        # SmartTrader config is optional on MAAMConfig; fall back to defaults.
+        self._mm_config: SmartTraderConfig = getattr(
+            self._config, "smart_trader", SmartTraderConfig()
+        )
 
         self._lob: Optional[LimitOrderBook] = None
-        self._market_makers: list[RLMarketMaker] = []
+        self._market_makers: list[SmartTrader] = []
         self._noise_pool: Optional[NoiseTraderPool] = None
         self._finbert_pool: Optional[FinBERTAgentPool] = None
         self._tick: int = 0
         self._shock_tick: int = 0
         self._volatility: float = base_volatility
         self._rng: Optional[np.random.Generator] = None
-        self._last_cached_states: dict[str, MarketMakerState] = {}
+        self._last_cached_states: dict[str, TraderState] = {}
         self._shock_orders_submitted: list[Order] = []
 
     def reset(self, seed: Optional[int] = None) -> dict:
@@ -89,10 +94,18 @@ class FlashCrashSimulation:
         self._lob = LimitOrderBook()
         Order.reset_id_counter()
 
-        self._market_makers = [
-            RLMarketMaker(f"MM_{i}", self._mm_config)
-            for i in range(self._num_market_makers)
-        ]
+        self._market_makers = []
+        for i in range(self._num_market_makers):
+            cfg = self._mm_config
+            if getattr(cfg, "sample_risk_aversion_lognormal", False):
+                gamma = float(self._rng.lognormal(
+                    mean=float(cfg.risk_aversion_lognorm_mu),
+                    sigma=float(cfg.risk_aversion_lognorm_sigma),
+                ))
+                gamma = max(float(cfg.risk_aversion_min), min(float(cfg.risk_aversion_max), gamma))
+                cfg = replace(cfg, risk_aversion=gamma)
+
+            self._market_makers.append(SmartTrader(f"MM_{i}", cfg))
 
         self._noise_pool = NoiseTraderPool(
             self._num_noise_traders,
@@ -146,7 +159,7 @@ class FlashCrashSimulation:
             self._inject_shock()
 
         # --- 3. Snapshot: all MMs observe the SAME book state ---
-        cached_states: dict[str, MarketMakerState] = {}
+        cached_states: dict[str, TraderState] = {}
         for mm in self._market_makers:
             cached_states[mm.agent_id] = mm.observe(self._lob, self._volatility)
         self._last_cached_states = cached_states
@@ -203,7 +216,7 @@ class FlashCrashSimulation:
         return self._volatility
 
     @property
-    def market_makers(self) -> list[RLMarketMaker]:
+    def market_makers(self) -> list[SmartTrader]:
         return self._market_makers
 
     @property
