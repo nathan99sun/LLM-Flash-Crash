@@ -52,8 +52,9 @@ class SmartTraderConfig:
 	risk_aversion_min: float = 1e-4
 	risk_aversion_max: float = 1.0
 
-	# Simulation horizon mapping (ticks -> (T - t))
-	horizon_ticks: int = 1000
+	# HFT assumption: treat (T - t) ≈ 1 for spread/reservation computations.
+	# (We keep this explicit so it's easy to reintroduce a finite horizon later.)
+	time_horizon: float = 1.0
 
 	# Portfolio / quoting controls
 	initial_cash: float = 100_000.0
@@ -138,9 +139,8 @@ class SmartTrader:
 		except Exception:
 			tick = 0
 
-		horizon = max(int(self.config.horizon_ticks), 1)
-		# Map ticks to a unitless remaining time in [0, 1]
-		time_remaining = _clamp((horizon - tick) / horizon, 0.0, 1.0)
+		# HFT: treat (T - t) as constant.
+		time_remaining = float(self.config.time_horizon)
 
 		return TraderState(
 			mid_price=float(mid),

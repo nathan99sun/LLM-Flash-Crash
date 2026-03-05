@@ -16,6 +16,16 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 
 from maam.env import FlashCrashSimulation
+from maam.config import MAAMConfig
+
+
+def _dynamic_test_config() -> MAAMConfig:
+    """Config tuned for visible pre-shock dynamics in self-tests."""
+    cfg = MAAMConfig()
+    cfg.noise_trader.arrival_rate = 20.0
+    cfg.noise_trader.min_qty = 10
+    cfg.noise_trader.max_qty = 180
+    return cfg
 
 
 # ======================================================================
@@ -34,6 +44,7 @@ def verify_snapshots(num_ticks: int = 10):
     print("=" * 70)
 
     sim = FlashCrashSimulation(
+        config=_dynamic_test_config(),
         episode_length=num_ticks,
         shock_window=(num_ticks + 10, num_ticks + 20),  # no shock during test
         num_market_makers=50,
@@ -98,6 +109,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     print("=" * 70)
 
     sim = FlashCrashSimulation(
+        config=_dynamic_test_config(),
         episode_length=episode_length,
         num_market_makers=50,
         num_noise_traders=50,

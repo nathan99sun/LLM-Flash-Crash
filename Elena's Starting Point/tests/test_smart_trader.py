@@ -29,7 +29,7 @@ class TestSmartTraderSpread(unittest.TestCase):
         config = SmartTraderConfig(
             risk_aversion=0.2,   # gamma
             liquidity_k=1.5,     # k
-            horizon_ticks=1000,
+            time_horizon=1.0,
             base_quote_qty=10,
         )
         trader = SmartTrader("ST_0", config)
@@ -45,7 +45,7 @@ class TestSmartTraderSpread(unittest.TestCase):
         state = trader.observe(lob, volatility=volatility)
         action = trader.act_heuristic(state)
 
-        tau = 1.0  # tick=0 -> time_remaining=1
+        tau = 1.0
         expected_total_spread = (
             config.risk_aversion * (volatility ** 2) * tau
             + (2.0 / config.risk_aversion) * math.log(1.0 + config.risk_aversion / config.liquidity_k)

@@ -7,14 +7,15 @@ models the realistic constraint that no agent can observe another agent's
 fresh quotes before deciding its own.
 
 Execution model per tick:
-  1. Noise traders submit random market orders (exogenous flow)
-  2. FinBERT shock (if this is the shock tick) — heterogeneous agents
-     analyze the headline and submit market orders
-  3. Snapshot the LOB — all market makers will observe THIS state
-  4. All market makers decide quotes from the cached snapshot
-  5. Randomize submission order, apply quotes to the live LOB
-  6. Collect executions, process fills, compute rewards
-  7. Volatility decays toward baseline
+    1. Process executions collected from the previous tick
+    2. Noise traders submit random market orders (exogenous flow)
+    3. FinBERT shock (if this is the shock tick) — heterogeneous agents
+         analyze the headline and submit market orders
+    4. Snapshot the LOB — all market makers will observe THIS state
+    5. All market makers decide quotes from the cached snapshot
+    6. Randomize submission order, apply quotes to the live LOB
+    7. Collect executions, compute rewards, and stage fills for next tick
+    8. Update volatility via EWMA of mid-price returns
 
 The gym.Env version is preserved below (commented out) for future RL work.
 """
@@ -68,7 +69,7 @@ class FlashCrashSimulation:
         self._shock_window = shock_window
         self._num_market_makers = num_market_makers
         self._num_noise_traders = num_noise_traders
-        self._num_finbert_agents = num_finbert_agents
+        self._num_finbert_agents = max(1, int(num_finbert_agents))
         self._base_volatility = base_volatility
 
         # SmartTrader config is optional on MAAMConfig; fall back to defaults.
@@ -83,9 +84,15 @@ class FlashCrashSimulation:
         self._tick: int = 0
         self._shock_tick: int = 0
         self._volatility: float = base_volatility
+        self._ewma_return_var: float = 0.0
+        self._baseline_return_var: float = 0.0
+        self._prev_mid_for_vol: Optional[float] = None
         self._rng: Optional[np.random.Generator] = None
         self._last_cached_states: dict[str, TraderState] = {}
         self._shock_orders_submitted: list[Order] = []
+        self._last_snapshot_depth: Optional[dict] = None
+        self._pending_executions: list = []
+        self._pending_exec_mid: Optional[float] = None
 
     def reset(self, seed: Optional[int] = None) -> dict:
         """Initialize a fresh simulation episode. Returns tick-0 info."""
@@ -120,8 +127,16 @@ class FlashCrashSimulation:
 
         self._tick = 0
         self._volatility = self._base_volatility
+        initial_mid = float(self._config.simulation.initial_mid_price)
+        baseline_return_sigma = self._base_volatility / max(initial_mid, 1e-12)
+        self._baseline_return_var = float(baseline_return_sigma**2)
+        self._ewma_return_var = float(self._baseline_return_var)
+        self._prev_mid_for_vol = None
         self._last_cached_states = {}
         self._shock_orders_submitted = []
+        self._last_snapshot_depth = None
+        self._pending_executions = []
+        self._pending_exec_mid = None
 
         self._shock_tick = int(self._rng.integers(
             self._shock_window[0], self._shock_window[1]
@@ -133,6 +148,14 @@ class FlashCrashSimulation:
             action = mm.act_heuristic(state)
             mm.submit_quotes(action, self._lob)
 
+        # Snapshot after seeding.
+        self._last_snapshot_depth = self._lob.get_depth()
+
+        # Initialize volatility state from the seeded book.
+        seeded_mid = self._last_snapshot_depth.get("mid_price")
+        if seeded_mid is not None:
+            self._prev_mid_for_vol = float(seeded_mid)
+
         return self._build_info()
 
     def step(self) -> dict:
@@ -140,15 +163,29 @@ class FlashCrashSimulation:
         Advance the simulation by one tick. Returns tick info dict.
 
         Execution order:
-          1. Noise traders (exogenous market orders)
-          2. FinBERT shock (if applicable) — heterogeneous news traders
-          3. Snapshot LOB for all market makers
-          4. All MMs decide from snapshot, submit in randomized order
-          5. Process fills and compute rewards
-          6. Update volatility
+          1. Process executions collected from prior tick
+          2. Noise traders (exogenous market orders)
+          3. FinBERT shock (if applicable) — heterogeneous news traders
+          4. Snapshot LOB for all market makers
+          5. All MMs decide from snapshot, submit in randomized order
+          6. Collect executions and compute rewards
+          7. Stage executions for next tick processing
+          8. Update volatility
         """
         self._tick += 1
         self._lob.set_tick(self._tick)
+
+        # --- 1. Process executions from previous tick ---
+        if self._pending_exec_mid is None:
+            pending_mid = self._lob.get_mid_price() or float(self._config.simulation.initial_mid_price)
+        else:
+            pending_mid = float(self._pending_exec_mid)
+
+        if self._pending_executions:
+            for mm in self._market_makers:
+                mm.process_executions(self._pending_executions, pending_mid)
+
+        # Start collecting executions for the *current* tick.
         self._lob.reset_tick_stats()
 
         # --- 1. Noise traders (exogenous flow) ---
@@ -157,6 +194,15 @@ class FlashCrashSimulation:
         # --- 2. FinBERT shock ---
         if self._tick == self._shock_tick:
             self._inject_shock()
+
+        # --- 2.5 Snapshot depth (this is what all MMs observe) ---
+        self._last_snapshot_depth = self._lob.get_depth()
+
+        # Update volatility from the snapshot mid BEFORE market makers observe/quote.
+        snapshot_mid = self._last_snapshot_depth.get("mid_price")
+        if snapshot_mid is None:
+            snapshot_mid = float(self._config.simulation.initial_mid_price)
+        self._update_volatility(float(snapshot_mid))
 
         # --- 3. Snapshot: all MMs observe the SAME book state ---
         cached_states: dict[str, TraderState] = {}
@@ -176,17 +222,21 @@ class FlashCrashSimulation:
             actions[mm.agent_id] = action
             mm.submit_quotes(action, self._lob)
 
-        # --- 5. Process fills and compute rewards ---
+        # --- 5. Collect executions and compute rewards ---
         all_executions = self._lob.get_tick_executions()
-        mid = self._lob.get_mid_price() or self._base_volatility
+        post_action_mid = self._lob.get_mid_price() or float(self._config.simulation.initial_mid_price)
+
+        # Mark-to-market before reward (without consuming current executions yet).
+        for mm in self._market_makers:
+            mm.process_executions([], post_action_mid)
 
         rewards: dict[str, float] = {}
         for mm in self._market_makers:
-            mm.process_executions(all_executions, mid)
             rewards[mm.agent_id] = mm.compute_reward(self._volatility)
 
-        # --- 6. Update volatility ---
-        self._update_volatility()
+        # Stage executions so they are processed at the start of the next tick.
+        self._pending_executions = list(all_executions)
+        self._pending_exec_mid = float(post_action_mid)
 
         return self._build_info(rewards=rewards)
 
@@ -236,7 +286,9 @@ class FlashCrashSimulation:
     # ------------------------------------------------------------------
 
     def _build_info(self, rewards: Optional[dict[str, float]] = None) -> dict:
-        depth = self._lob.get_depth()
+        # Report the pre-MM snapshot depth (post noise/shock), so the
+        # reported mid reflects order flow and not quote-refreshing.
+        depth = self._last_snapshot_depth or self._lob.get_depth()
         inventories = [mm.inventory for mm in self._market_makers]
         return {
             "tick": self._tick,
@@ -258,23 +310,51 @@ class FlashCrashSimulation:
     def _inject_shock(self):
         """
         FinBERT-driven shock: all FinBERT agents analyze the headline
-        and independently decide whether to trade. Volatility spikes
-        regardless of how many agents act.
+        and independently decide whether to trade.
         """
-        headline = self._config.shock.headline
-        self._shock_orders_submitted = self._finbert_pool.react_to_news(
-            headline, self._lob
-        )
-        self._volatility *= self._config.shock.post_shock_volatility_multiplier
+        if self._finbert_pool is None or len(self._finbert_pool.agents) == 0:
+            raise RuntimeError("FinBERT pool is empty at shock tick; expected at least one FinBERT agent")
 
-    def _update_volatility(self):
-        """Exponential decay of volatility back toward baseline after shock."""
-        if self._tick > self._shock_tick:
-            decay_rate = 0.995
-            self._volatility = (
-                self._base_volatility
-                + (self._volatility - self._base_volatility) * decay_rate
-            )
+        headline = self._config.shock.headline
+        self._shock_orders_submitted = self._finbert_pool.react_to_news(headline, self._lob)
+
+        multiplier = float(self._config.shock.post_shock_volatility_multiplier)
+        self._volatility = max(float(self._base_volatility), float(self._volatility) * max(1.0, multiplier))
+
+        mid = self._lob.get_mid_price() or float(self._config.simulation.initial_mid_price)
+        if mid > 0:
+            implied_return_sigma = float(self._volatility) / float(mid)
+            implied_return_var = float(implied_return_sigma * implied_return_sigma)
+            self._ewma_return_var = max(float(self._ewma_return_var), implied_return_var)
+
+    def _update_volatility(self, mid_price: float):
+        """Update volatility via EWMA of mid-price log-returns.
+
+        We estimate return variance with EWMA:
+          v_t = λ v_{t-1} + (1-λ) r_t^2
+        and convert to *price* volatility via:
+          σ_price = mid * sqrt(v_t)
+
+        A floor equal to the baseline variance is applied so volatility
+        doesn't collapse to ~0 in quiet periods.
+        """
+        if mid_price <= 0:
+            return
+
+        if self._prev_mid_for_vol is None or self._prev_mid_for_vol <= 0:
+            self._prev_mid_for_vol = float(mid_price)
+            self._volatility = max(float(self._volatility), float(self._base_volatility))
+            return
+
+        r_t = float(np.log(mid_price / self._prev_mid_for_vol))
+        lam = float(getattr(self._config.simulation, "vol_ewma_lambda", 0.97))
+        lam = float(min(0.9999, max(0.0, lam)))
+
+        self._ewma_return_var = lam * float(self._ewma_return_var) + (1.0 - lam) * (r_t * r_t)
+        self._ewma_return_var = max(float(self._ewma_return_var), float(self._baseline_return_var))
+
+        self._volatility = float(mid_price) * float(np.sqrt(self._ewma_return_var))
+        self._prev_mid_for_vol = float(mid_price)
 
 
 # ======================================================================

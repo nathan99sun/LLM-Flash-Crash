@@ -25,6 +25,11 @@ class SimulationConfig:
     initial_mid_price: float = 100.00
     lob_depth_levels: int = 5       # levels returned in Level-2 data
 
+    # --- Volatility estimation ---
+    # EWMA parameter for return variance: v_t = λ v_{t-1} + (1-λ) r_t^2
+    # Larger λ => slower adaptation.
+    vol_ewma_lambda: float = 0.97
+
     # --- Agent populations ---
     num_noise_traders: int = 50
     num_rl_market_makers: int = 50
