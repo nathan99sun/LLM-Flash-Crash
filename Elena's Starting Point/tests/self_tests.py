@@ -22,9 +22,9 @@ from maam.config import MAAMConfig
 def _dynamic_test_config() -> MAAMConfig:
     """Config tuned for visible pre-shock dynamics in self-tests."""
     cfg = MAAMConfig()
-    cfg.noise_trader.arrival_rate = 20.0
+    cfg.noise_trader.arrival_rate = 10.0
     cfg.noise_trader.min_qty = 10
-    cfg.noise_trader.max_qty = 180
+    cfg.noise_trader.max_qty = 100
     return cfg
 
 
