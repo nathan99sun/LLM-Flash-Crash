@@ -22,7 +22,7 @@ from maam.config import MAAMConfig
 def _dynamic_test_config() -> MAAMConfig:
     """Config tuned for visible pre-shock dynamics in self-tests."""
     cfg = MAAMConfig()
-    cfg.noise_trader.arrival_rate = 10.0
+    cfg.noise_trader.arrival_rate = 1.0
     cfg.noise_trader.min_qty = 10
     cfg.noise_trader.max_qty = 100
     return cfg
@@ -112,7 +112,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
         config=_dynamic_test_config(),
         episode_length=episode_length,
         num_market_makers=50,
-        num_noise_traders=50,
+        num_noise_traders=100,
         num_finbert_agents=50,
     )
     info0 = sim.reset(seed=seed)
@@ -124,7 +124,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     header = (
         f"{'Tick':>6s} | {'Mid':>9s} | {'Spread':>7s} | {'BidD':>7s} | "
         f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | "
-        f"{'MeanRwd':>9s} | {'Event':s}"
+        f"{'BestBid':>9s} | {'BestAsk':>9s} | {'MeanRwd':>9s} | {'Event':s}"
     )
     print(header)
     print("-" * len(header))
@@ -141,12 +141,15 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 
         mid_str = f"{info['mid_price']:9.2f}" if info["mid_price"] is not None else "     None"
         spread_str = f"{info['spread']:7.2f}" if info["spread"] is not None else "   None"
+        best_bid_str = f"{info['best_bid']:9.2f}" if info.get("best_bid") is not None else "     None"
+        best_ask_str = f"{info['best_ask']:9.2f}" if info.get("best_ask") is not None else "     None"
 
         print(
             f"{info['tick']:6d} | {mid_str} | {spread_str} | "
             f"{info['bid_depth']:7d} | {info['ask_depth']:7d} | "
             f"{info['volatility']:8.4f} | {info['mean_inventory']:8.2f} | "
-            f"{info['max_abs_inventory']:7d} | {mean_rwd:9.4f} | {event}"
+            f"{info['max_abs_inventory']:7d} | {best_bid_str} | {best_ask_str} | "
+            f"{mean_rwd:9.4f} | {event}"
         )
 
     print()

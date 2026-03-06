@@ -179,26 +179,26 @@ class SmartTrader:
 		return gamma * sigma2 * tau + (2.0 / gamma) * math.log(1.0 + gamma / k)
 
 	def act_heuristic(self, state: TraderState) -> QuoteAction:
-		"""Compute symmetric offsets from the Eq. (3.18) total spread."""
+		"""Quote offsets around reservation price: r = s - q*γ*σ² (using tau)."""
 
 		total_spread = self._total_spread(state.volatility, state.time_remaining)
-		noise_std = max(float(self.config.quote_price_noise_std), 0.0)
-		noise = float(self._rng.normal(0.0, noise_std)) if self._rng is not None else float(np.random.normal(0.0, noise_std))
-		reference_price = state.mid_price + noise
 
-		# Reservation price shift (inventory skew)
+		# s = actual observed mid price
+		s = float(state.mid_price)
+
+		# Reservation price shift (inventory skew): r = s - q*γ*σ²*tau
 		gamma = max(float(self.config.risk_aversion), 1e-9)
 		sigma2_tau = (max(float(state.volatility), 0.0) ** 2) * _clamp(state.time_remaining, 0.0, 1.0)
-		reservation_price = reference_price - self.inventory * gamma * sigma2_tau
+		reservation_price = s - float(self.inventory) * gamma * sigma2_tau
 
 		half_spread = max(total_spread / 2.0, 0.01)
-
 		bid_price = reservation_price - half_spread
 		ask_price = reservation_price + half_spread
 
-		# Convert to offsets from mid (matching the existing quoting interface)
-		bid_offset = max(state.mid_price - bid_price, 0.01)
-		ask_offset = max(ask_price - state.mid_price, 0.01)
+		# Convert to offsets from *mid* (the interface expects mid-based offsets),
+		# but center the quotes around reservation_price, not s.
+		bid_offset = max(s - bid_price, 0.01)
+		ask_offset = max(ask_price - s, 0.01)
 
 		# Reduce quote size as inventory approaches the hard limit.
 		inv_fraction = abs(self.inventory) / max(self.config.inventory_limit, 1)
