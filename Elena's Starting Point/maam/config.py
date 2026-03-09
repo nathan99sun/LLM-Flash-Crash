@@ -106,6 +106,7 @@ class ShockConfig:
         "expected to face severe headwinds."
     )
     post_shock_volatility_multiplier: float = 5.0
+    fundamental_drop: float = 2.0           # permanent downward shift in fundamental value
 
 
 # ---------------------------------------------------------------------------

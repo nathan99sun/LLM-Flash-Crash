@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import math
-import numpy as np
 
 from dataclasses import dataclass
 from typing import Optional
@@ -56,8 +55,6 @@ class SmartTraderConfig:
 	# HFT assumption: treat (T - t) ≈ 1 for spread/reservation computations.
 	# (We keep this explicit so it's easy to reintroduce a finite horizon later.)
 	time_horizon: float = 1.0
-	# Quote center process: reference price = mid + Normal(0, std).
-	quote_price_noise_std: float = 1.0
 
 	# Portfolio / quoting controls
 	initial_cash: float = 100_000.0
@@ -65,12 +62,15 @@ class SmartTraderConfig:
 	inventory_limit: int = 100
 	breach_penalty: float = 500.0
 
+	
+
 
 @dataclass
 class TraderState:
 	"""Observable snapshot for the trader's decision."""
 
 	mid_price: float = 100.0
+	fundamental_price: float = 100.0
 	spread: float = 1.0
 	bid_depth: float = 0.0
 	ask_depth: float = 0.0
@@ -85,10 +85,14 @@ class TraderState:
 
 @dataclass
 class QuoteAction:
-	"""Quote action expressed as offsets from the mid (for compatibility)."""
+	"""Quote action expressed as absolute bid/ask prices.
 
-	bid_offset: float
-	ask_offset: float
+	Prices are computed directly from the AS reservation price and optimal
+	spread, so no reference-price decoding is needed at submission time.
+	"""
+
+	bid_price: float
+	ask_price: float
 	bid_qty: int
 	ask_qty: int
 	cancel_existing: bool = True
@@ -107,15 +111,9 @@ def _round_to_tick(price: float, tick_size: float) -> float:
 class SmartTrader:
 	"""A market-making style trader that quotes using Eq. (3.18)."""
 
-	def __init__(
-		self,
-		agent_id: str,
-		config: Optional[SmartTraderConfig] = None,
-		rng: Optional[np.random.Generator] = None,
-	):
+	def __init__(self, agent_id: str, config: Optional[SmartTraderConfig] = None):
 		self.agent_id = agent_id
 		self.config = config or SmartTraderConfig()
-		self._rng = rng
 
 		self.cash: float = self.config.initial_cash
 		self.inventory: int = 0
@@ -137,7 +135,7 @@ class SmartTrader:
 	# Core loop helpers
 	# ------------------------------------------------------------------
 
-	def observe(self, lob: LimitOrderBook, volatility: float) -> TraderState:
+	def observe(self, lob: LimitOrderBook, volatility: float, fundamental_price: float = 100.0) -> TraderState:
 		depth = lob.get_depth()
 		mid = depth["mid_price"] or self._last_mid_price
 		spread = depth["spread"] or 1.0
@@ -153,6 +151,7 @@ class SmartTrader:
 
 		return TraderState(
 			mid_price=float(mid),
+			fundamental_price=float(fundamental_price),
 			spread=float(spread),
 			bid_depth=float(depth["total_bid_qty"]),
 			ask_depth=float(depth["total_ask_qty"]),
@@ -179,73 +178,54 @@ class SmartTrader:
 		return gamma * sigma2 * tau + (2.0 / gamma) * math.log(1.0 + gamma / k)
 
 	def act_heuristic(self, state: TraderState) -> QuoteAction:
-		"""Quote offsets around reservation price: r = s - q*γ*σ² (using tau)."""
+		"""Compute absolute bid/ask from the AS reservation price + Eq. (3.18) spread."""
 
 		total_spread = self._total_spread(state.volatility, state.time_remaining)
 
-		# s = actual observed mid price
-		s = float(state.mid_price)
-
-		# Reservation price shift (inventory skew): r = s - q*γ*σ²*tau
 		gamma = max(float(self.config.risk_aversion), 1e-9)
 		sigma2_tau = (max(float(state.volatility), 0.0) ** 2) * _clamp(state.time_remaining, 0.0, 1.0)
-		reservation_price = s - float(self.inventory) * gamma * sigma2_tau
+		reservation_price = state.fundamental_price - self.inventory * gamma * sigma2_tau
 
 		half_spread = max(total_spread / 2.0, 0.01)
+
 		bid_price = reservation_price - half_spread
 		ask_price = reservation_price + half_spread
 
-		# Convert to offsets from *mid* (the interface expects mid-based offsets),
-		# but center the quotes around reservation_price, not s.
-		bid_offset = max(s - bid_price, 0.01)
-		ask_offset = max(ask_price - s, 0.01)
-
-		# Reduce quote size as inventory approaches the hard limit.
-		inv_fraction = abs(self.inventory) / max(self.config.inventory_limit, 1)
-		qty_scale = max(0.1, 1.0 - inv_fraction * 0.8)
-		qty = max(1, int(self.config.base_quote_qty * qty_scale))
+		qty = int(max(1, self.config.base_quote_qty))
 		bid_qty = qty if self.inventory < self.config.inventory_limit else 0
 		ask_qty = qty if self.inventory > -self.config.inventory_limit else 0
 
 		return QuoteAction(
-			bid_offset=float(bid_offset),
-			ask_offset=float(ask_offset),
+			bid_price=float(bid_price),
+			ask_price=float(ask_price),
 			bid_qty=int(bid_qty),
 			ask_qty=int(ask_qty),
 			cancel_existing=True,
 		)
 
-	def submit_quotes(
-		self,
-		action: QuoteAction,
-		lob: LimitOrderBook,
-		reference_mid: Optional[float] = None,
-	) -> list[Order]:
+	def submit_quotes(self, action: QuoteAction, lob: LimitOrderBook) -> list[Order]:
 		if action.cancel_existing:
 			lob.cancel_all_by_agent(self.agent_id)
 
-		mid = float(reference_mid) if reference_mid is not None else (lob.get_mid_price() or self._last_mid_price)
 		submitted: list[Order] = []
 
 		if action.bid_qty > 0:
-			bid_price = _round_to_tick(mid - action.bid_offset, lob.tick_size)
 			bid_order = Order(
 				agent_id=self.agent_id,
 				side=Side.BUY,
 				order_type=OrderType.LIMIT,
-				price=bid_price,
+				price=_round_to_tick(action.bid_price, lob.tick_size),
 				qty=action.bid_qty,
 			)
 			lob.submit_order(bid_order)
 			submitted.append(bid_order)
 
 		if action.ask_qty > 0:
-			ask_price = _round_to_tick(mid + action.ask_offset, lob.tick_size)
 			ask_order = Order(
 				agent_id=self.agent_id,
 				side=Side.SELL,
 				order_type=OrderType.LIMIT,
-				price=ask_price,
+				price=_round_to_tick(action.ask_price, lob.tick_size),
 				qty=action.ask_qty,
 			)
 			lob.submit_order(ask_order)

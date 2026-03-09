@@ -65,8 +65,12 @@ class NoiseTraderPool:
             NoiseTrader(f"Noise_{i}", config) for i in range(num_traders)
         ]
 
-    def generate_orders(self) -> list[Order]:
-        """Generate this tick's market orders without submitting to the LOB."""
+    def step(self, lob: LimitOrderBook) -> list[Order]:
+        """
+        Generate orders for this tick and submit them to the LOB.
+
+        Returns the list of orders that were submitted (for logging).
+        """
         num_arrivals = min(
             self.rng.poisson(self.config.arrival_rate),
             len(self.traders),
@@ -78,21 +82,10 @@ class NoiseTraderPool:
             self.traders, size=num_arrivals, replace=False
         )
 
-        orders: list[Order] = []
+        submitted = []
         for trader in selected:
             order = trader.generate_order(rng=self.rng)
-            orders.append(order)
-
-        return orders
-
-    def step(self, lob: LimitOrderBook) -> list[Order]:
-        """
-        Generate orders for this tick and submit them to the LOB.
-
-        Returns the list of orders that were submitted (for logging).
-        """
-        orders = self.generate_orders()
-        for order in orders:
             lob.submit_order(order)
+            submitted.append(order)
 
-        return orders
+        return submitted

@@ -119,34 +119,22 @@ class FinBERTAgentPool:
             FinBERTAgent(f"FinBERT_{i}", config) for i in range(num_agents)
         ]
 
-    def plan_reaction(self, headline: str) -> list[Order]:
-        """Plan FinBERT orders from a headline without touching the LOB."""
-        planned: list[Order] = []
+    def react_to_news(self, headline: str, lob: LimitOrderBook) -> list[Order]:
+        """
+        All agents analyze the headline and submit orders to the LOB.
+
+        Returns the list of orders that were submitted (for logging).
+        Only called when a news shock is injected into the simulation.
+        """
+        submitted = []
         for agent in self.agents:
             order = agent.analyze_and_trade(headline)
             if order is not None:
-                planned.append(order)
-
-        return planned
-
-    def submit_orders(self, lob: LimitOrderBook, orders: list[Order]) -> list[Order]:
-        """Submit pre-planned FinBERT orders to the LOB."""
-        submitted: list[Order] = []
-        for order in orders:
-            lob.submit_order(order)
-            submitted.append(order)
+                lob.submit_order(order)
+                submitted.append(order)
 
         logger.info(
             "FinBERT pool: %d/%d agents traded on headline",
             len(submitted), len(self.agents),
         )
         return submitted
-
-    def react_to_news(self, headline: str, lob: LimitOrderBook) -> list[Order]:
-        """
-        Backward-compatible helper: plan and immediately submit shock orders.
-
-        Returns the list of orders that were submitted (for logging).
-        """
-        planned = self.plan_reaction(headline)
-        return self.submit_orders(lob, planned)

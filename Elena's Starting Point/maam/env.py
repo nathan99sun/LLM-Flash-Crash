@@ -1,13 +1,21 @@
 """
-FlashCrashSimulation — strict snapshot-decide-submit simulation.
+FlashCrashSimulation — simultaneous-snapshot simulation of a flash crash.
 
-Each tick uses a two-phase protocol:
-  1) Snapshot: process prior executions, then freeze a single LOB snapshot.
-  2) Decide/submit: all agents decide from that frozen snapshot, then all
-    planned orders are applied to the live book.
+All market makers observe the same LOB snapshot (taken after noise traders
+and any shock have acted), then submit quotes in randomized order. This
+models the realistic constraint that no agent can observe another agent's
+fresh quotes before deciding its own.
 
-This prevents any agent from observing intra-tick updates caused by other
-agents' freshly submitted orders.
+Execution model per tick:
+    1. Process executions collected from the previous tick
+    2. Noise traders submit random market orders (exogenous flow)
+    3. FinBERT shock (if this is the shock tick) — heterogeneous agents
+         analyze the headline and submit market orders
+    4. Snapshot the LOB — all market makers will observe THIS state
+    5. All market makers decide quotes from the cached snapshot
+    6. Randomize submission order, apply quotes to the live LOB
+    7. Collect executions, compute rewards, and stage fills for next tick
+    8. Update volatility via EWMA of mid-price returns
 
 The gym.Env version is preserved below (commented out) for future RL work.
 """
@@ -41,8 +49,9 @@ class FlashCrashSimulation:
       - FinBERT news traders (50): heterogeneous sentiment-driven agents
         that react to a news headline at the shock tick
 
-    Each tick, all agents decide from the same frozen LOB snapshot from
-    the start of that tick. No agent observes intra-tick book updates.
+    Each tick, all market makers observe the same LOB snapshot (taken
+    after noise traders and any shock have acted), then submit quotes
+    in a randomized order.
     """
 
     def __init__(
@@ -54,6 +63,8 @@ class FlashCrashSimulation:
         num_noise_traders: int = 50,
         num_finbert_agents: int = 50,
         base_volatility: float = 0.02,
+        ewma_alpha: float = 0.05,
+        fundamental_sigma: float = 0.1,
     ):
         self._config = config or MAAMConfig()
         self._episode_length = episode_length
@@ -62,6 +73,13 @@ class FlashCrashSimulation:
         self._num_noise_traders = num_noise_traders
         self._num_finbert_agents = max(1, int(num_finbert_agents))
         self._base_volatility = base_volatility
+        self._ewma_alpha = ewma_alpha
+        self._fundamental_sigma = fundamental_sigma
+        self._fundamental_price: float = 100.0
+
+        # EWMA volatility state (tracks σ² and derives σ)
+        self._volatility_sq: float = base_volatility ** 2
+        self._prev_mid_price: float = 100.0
 
         # SmartTrader config is optional on MAAMConfig; fall back to defaults.
         self._mm_config: SmartTraderConfig = getattr(
@@ -103,7 +121,7 @@ class FlashCrashSimulation:
                 gamma = max(float(cfg.risk_aversion_min), min(float(cfg.risk_aversion_max), gamma))
                 cfg = replace(cfg, risk_aversion=gamma)
 
-            self._market_makers.append(SmartTrader(f"MM_{i}", cfg, rng=self._rng))
+            self._market_makers.append(SmartTrader(f"MM_{i}", cfg))
 
         self._noise_pool = NoiseTraderPool(
             self._num_noise_traders,
@@ -123,6 +141,7 @@ class FlashCrashSimulation:
         self._baseline_return_var = float(baseline_return_sigma**2)
         self._ewma_return_var = float(self._baseline_return_var)
         self._prev_mid_for_vol = None
+        self._fundamental_price = float(initial_mid)
         self._last_cached_states = {}
         self._shock_orders_submitted = []
         self._last_snapshot_depth = None
@@ -135,7 +154,7 @@ class FlashCrashSimulation:
 
         # Seed the book with initial quotes so tick 1 has liquidity.
         for mm in self._market_makers:
-            state = mm.observe(self._lob, self._volatility)
+            state = mm.observe(self._lob, self._volatility, self._fundamental_price)
             action = mm.act_heuristic(state)
             mm.submit_quotes(action, self._lob)
 
@@ -155,11 +174,13 @@ class FlashCrashSimulation:
 
         Execution order:
           1. Process executions collected from prior tick
-                    2. Snapshot LOB state for all agents
-                    3. All agents decide from the frozen snapshot
-                    4. Apply planned orders to the live LOB
-                    5. Collect executions and compute rewards
-                    6. Stage executions for next tick processing
+          2. Noise traders (exogenous market orders)
+          3. FinBERT shock (if applicable) — heterogeneous news traders
+          4. Snapshot LOB for all market makers
+          5. All MMs decide from snapshot, submit in randomized order
+          6. Collect executions and compute rewards
+          7. Stage executions for next tick processing
+          8. Update volatility
         """
         self._tick += 1
         self._lob.set_tick(self._tick)
@@ -177,68 +198,46 @@ class FlashCrashSimulation:
         # Start collecting executions for the *current* tick.
         self._lob.reset_tick_stats()
 
-        # --- 2. Snapshot depth (all agents decide from THIS state) ---
+        # --- 1. Noise traders (exogenous flow) ---
+        self._noise_pool.step(self._lob)
+
+        # --- 1b. Evolve fundamental price (exogenous random walk) ---
+        self._fundamental_price += self._rng.normal(0, self._fundamental_sigma)
+
+        # --- 2. FinBERT shock ---
+        if self._tick == self._shock_tick:
+            self._inject_shock()
+
+        # --- 2.5 Snapshot depth (this is what all MMs observe) ---
         self._last_snapshot_depth = self._lob.get_depth()
 
-        # Keep decision-time volatility fixed from the prior tick.
+        # Update volatility from the snapshot mid BEFORE market makers observe/quote.
         snapshot_mid = self._last_snapshot_depth.get("mid_price")
         if snapshot_mid is None:
             snapshot_mid = float(self._config.simulation.initial_mid_price)
+        self._update_volatility(float(snapshot_mid))
 
-        # --- 3. Decision phase (no LOB updates) ---
-        noise_orders = self._noise_pool.generate_orders()
-
-        planned_shock_orders: list[Order] = []
-        if self._tick == self._shock_tick:
-            headline = self._config.shock.headline
-            planned_shock_orders = self._finbert_pool.plan_reaction(headline)
-
-            multiplier = float(self._config.shock.post_shock_volatility_multiplier)
-            self._volatility = max(float(self._base_volatility), float(self._volatility) * max(1.0, multiplier))
-
-            if snapshot_mid > 0:
-                implied_return_sigma = float(self._volatility) / float(snapshot_mid)
-                implied_return_var = float(implied_return_sigma * implied_return_sigma)
-                self._ewma_return_var = max(float(self._ewma_return_var), implied_return_var)
-
+        # --- 3. Snapshot: all MMs observe the SAME book state ---
         cached_states: dict[str, TraderState] = {}
         for mm in self._market_makers:
-            cached_states[mm.agent_id] = mm.observe(self._lob, self._volatility)
+            cached_states[mm.agent_id] = mm.observe(self._lob, self._volatility, self._fundamental_price)
         self._last_cached_states = cached_states
 
-        # Decide MM actions from cached snapshot states.
+        # --- 4. Decide + submit in randomized order ---
         order = list(range(len(self._market_makers)))
         self._rng.shuffle(order)
 
         actions: dict[str, QuoteAction] = {}
-        mm_ordered_actions: list[tuple[SmartTrader, QuoteAction]] = []
         for i in order:
             mm = self._market_makers[i]
             state = cached_states[mm.agent_id]
             action = mm.act_heuristic(state)
             actions[mm.agent_id] = action
-            mm_ordered_actions.append((mm, action))
-
-        # --- 4. Submission phase (apply planned orders to live LOB) ---
-        # Post MM liquidity first, then let market-order flow consume it.
-        skip_mm_requote_this_tick = bool(planned_shock_orders)
-        if not skip_mm_requote_this_tick:
-            for mm, action in mm_ordered_actions:
-                mm.submit_quotes(action, self._lob, reference_mid=float(snapshot_mid))
-
-        for order_obj in noise_orders:
-            self._lob.submit_order(order_obj)
-
-        self._shock_orders_submitted = []
-        if planned_shock_orders:
-            self._shock_orders_submitted = self._finbert_pool.submit_orders(self._lob, planned_shock_orders)
+            mm.submit_quotes(action, self._lob)
 
         # --- 5. Collect executions and compute rewards ---
         all_executions = self._lob.get_tick_executions()
         post_action_mid = self._lob.get_mid_price() or float(self._config.simulation.initial_mid_price)
-
-        # Update volatility from realized post-submission market state.
-        self._update_volatility(float(post_action_mid))
 
         # Mark-to-market before reward (without consuming current executions yet).
         for mm in self._market_makers:
@@ -300,8 +299,9 @@ class FlashCrashSimulation:
     # ------------------------------------------------------------------
 
     def _build_info(self, rewards: Optional[dict[str, float]] = None) -> dict:
-        # Report the realized post-submission market state for this tick.
-        depth = self._lob.get_depth()
+        # Report the pre-MM snapshot depth (post noise/shock), so the
+        # reported mid reflects order flow and not quote-refreshing.
+        depth = self._last_snapshot_depth or self._lob.get_depth()
         inventories = [mm.inventory for mm in self._market_makers]
         return {
             "tick": self._tick,
@@ -313,6 +313,7 @@ class FlashCrashSimulation:
             "bid_depth": depth["total_bid_qty"],
             "ask_depth": depth["total_ask_qty"],
             "volatility": self._volatility,
+            "fundamental_price": self._fundamental_price,
             "inventories": inventories,
             "mean_inventory": float(np.mean(inventories)),
             "max_abs_inventory": int(max(abs(i) for i in inventories)),
@@ -322,13 +323,16 @@ class FlashCrashSimulation:
 
     def _inject_shock(self):
         """
-        Backward-compatible shock path used outside the main step loop.
+        FinBERT-driven shock: all FinBERT agents analyze the headline
+        and independently decide whether to trade.
         """
         if self._finbert_pool is None or len(self._finbert_pool.agents) == 0:
             raise RuntimeError("FinBERT pool is empty at shock tick; expected at least one FinBERT agent")
 
         headline = self._config.shock.headline
         self._shock_orders_submitted = self._finbert_pool.react_to_news(headline, self._lob)
+
+        self._fundamental_price -= float(self._config.shock.fundamental_drop)
 
         multiplier = float(self._config.shock.post_shock_volatility_multiplier)
         self._volatility = max(float(self._base_volatility), float(self._volatility) * max(1.0, multiplier))
@@ -367,7 +371,6 @@ class FlashCrashSimulation:
 
         self._volatility = float(mid_price) * float(np.sqrt(self._ewma_return_var))
         self._prev_mid_for_vol = float(mid_price)
-
 
 # ======================================================================
 # COMMENTED OUT: Gymnasium RL environment (for future RL training)

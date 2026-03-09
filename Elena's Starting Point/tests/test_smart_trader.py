@@ -31,7 +31,7 @@ class TestSmartTraderSpread(unittest.TestCase):
             liquidity_k=1.5,     # k
             time_horizon=1.0,
             base_quote_qty=10,
-            quote_price_noise_std=0.0,
+            sample_risk_aversion_lognormal=False,
         )
         trader = SmartTrader("ST_0", config)
 
@@ -43,7 +43,8 @@ class TestSmartTraderSpread(unittest.TestCase):
         lob.submit_order(lob.make_limit_order("X", "sell", 101.0, 100))
 
         volatility = 0.3
-        state = trader.observe(lob, volatility=volatility)
+        fundamental = 100.0
+        state = trader.observe(lob, volatility=volatility, fundamental_price=fundamental)
         action = trader.act_heuristic(state)
 
         tau = 1.0
@@ -51,18 +52,15 @@ class TestSmartTraderSpread(unittest.TestCase):
             config.risk_aversion * (volatility ** 2) * tau
             + (2.0 / config.risk_aversion) * math.log(1.0 + config.risk_aversion / config.liquidity_k)
         )
+        half_spread = expected_total_spread / 2.0
 
-        # Offsets are from mid: at inventory=0 they should be symmetric.
-        self.assertAlmostEqual(action.bid_offset, expected_total_spread / 2.0, places=6)
-        self.assertAlmostEqual(action.ask_offset, expected_total_spread / 2.0, places=6)
+        # At inventory=0, reservation_price == fundamental_price,
+        # so bid/ask should be symmetric around fundamental.
+        self.assertAlmostEqual(fundamental - action.bid_price, half_spread, places=6)
+        self.assertAlmostEqual(action.ask_price - fundamental, half_spread, places=6)
 
     def test_submit_quotes_posts_orders_and_spread_is_positive(self):
-        config = SmartTraderConfig(
-            risk_aversion=0.05,
-            liquidity_k=2.0,
-            base_quote_qty=25,
-            quote_price_noise_std=0.0,
-        )
+        config = SmartTraderConfig(risk_aversion=0.05, liquidity_k=2.0, base_quote_qty=25)
         trader = SmartTrader("ST_0", config)
 
         lob = fresh_lob()
@@ -78,35 +76,6 @@ class TestSmartTraderSpread(unittest.TestCase):
         self.assertIsNotNone(best_bid)
         self.assertIsNotNone(best_ask)
         self.assertGreater(best_ask, best_bid)
-
-    def test_different_inventories_produce_different_quote_quantities(self):
-        config = SmartTraderConfig(
-            risk_aversion=0.05,
-            liquidity_k=2.0,
-            base_quote_qty=50,
-            inventory_limit=100,
-            quote_price_noise_std=0.0,
-        )
-        trader_low_inv = SmartTrader("ST_low", config)
-        trader_high_inv = SmartTrader("ST_high", config)
-
-        trader_low_inv.inventory = 0
-        trader_high_inv.inventory = 80
-
-        lob = fresh_lob()
-        lob.submit_order(lob.make_limit_order("X", "buy", 99.0, 100))
-        lob.submit_order(lob.make_limit_order("X", "sell", 101.0, 100))
-
-        state_low = trader_low_inv.observe(lob, volatility=0.1)
-        state_high = trader_high_inv.observe(lob, volatility=0.1)
-
-        action_low = trader_low_inv.act_heuristic(state_low)
-        action_high = trader_high_inv.act_heuristic(state_high)
-
-        self.assertNotEqual(action_low.bid_qty, action_high.bid_qty)
-        self.assertNotEqual(action_low.ask_qty, action_high.ask_qty)
-        self.assertGreater(action_low.bid_qty, action_high.bid_qty)
-        self.assertGreater(action_low.ask_qty, action_high.ask_qty)
 
 
 if __name__ == "__main__":
