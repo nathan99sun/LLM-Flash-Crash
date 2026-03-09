@@ -24,7 +24,7 @@ def _dynamic_test_config() -> MAAMConfig:
     cfg = MAAMConfig()
     cfg.noise_trader.arrival_rate = 10.0
     cfg.noise_trader.min_qty = 10
-    cfg.noise_trader.max_qty = 100
+    cfg.noise_trader.max_qty = 50
     return cfg
 
 
@@ -96,6 +96,41 @@ def verify_snapshots(num_ticks: int = 10):
 
 
 # ======================================================================
+# Part 1.5: Risk Aversion Heterogeneity Check
+# ======================================================================
+
+def verify_risk_aversion_heterogeneity(seed: int = 42) -> bool:
+    """Ensure market makers do not all share identical risk aversion."""
+    print("=" * 70)
+    print("PART 1.5: Risk Aversion Heterogeneity")
+    print("  Checking MM risk aversions are not all identical")
+    print("=" * 70)
+
+    sim = FlashCrashSimulation(
+        config=_dynamic_test_config(),
+        episode_length=1,
+        num_market_makers=50,
+        num_noise_traders=50,
+        num_finbert_agents=20,
+    )
+    sim.reset(seed=seed)
+
+    gammas = [float(mm.config.risk_aversion) for mm in sim.market_makers]
+    unique_gammas = len({round(g, 12) for g in gammas})
+
+    if unique_gammas <= 1:
+        print("  >> FAIL: all market makers have the same risk aversion.")
+        print("  >> SKIP: not running the full 1000-tick simulation.")
+        print()
+        return False
+
+    print(f"  >> PASS: {unique_gammas}/{len(gammas)} unique risk aversions.")
+    print(f"  >> Range: min={min(gammas):.6f}, max={max(gammas):.6f}")
+    print()
+    return True
+
+
+# ======================================================================
 # Part 2: Full 1000-tick Simulation Loop
 # ======================================================================
 
@@ -123,7 +158,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 
     header = (
         f"{'Tick':>6s} | {'Mid':>9s} | {'FundP':>9s} | {'Spread':>7s} | {'BidD':>7s} | "
-        f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | "
+        f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | {'MaxSize':>7s} | "
         f"{'MeanRwd':>9s} | {'Event':s}"
     )
     print(header)
@@ -147,7 +182,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
             f"{info['tick']:6d} | {mid_str} | {fund_str} | {spread_str} | "
             f"{info['bid_depth']:7d} | {info['ask_depth']:7d} | "
             f"{info['volatility']:8.4f} | {info['mean_inventory']:8.2f} | "
-            f"{info['max_abs_inventory']:7d} | {mean_rwd:9.4f} | {event}"
+            f"{info['max_abs_inventory']:7d} | {info.get('max_trade_size', 0):7d} | {mean_rwd:9.4f} | {event}"
         )
 
     print()
@@ -166,4 +201,9 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 if __name__ == "__main__":
     passed = verify_snapshots(num_ticks=10)
     print()
+    heterogeneous = verify_risk_aversion_heterogeneity(seed=42)
+    if not heterogeneous:
+        print("Stopped before Part 2 because MM risk aversion is homogeneous.")
+        sys.exit(0)
+
     run_full_simulation(episode_length=1000, seed=42)

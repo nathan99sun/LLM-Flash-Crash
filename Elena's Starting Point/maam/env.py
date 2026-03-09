@@ -247,11 +247,13 @@ class FlashCrashSimulation:
         for mm in self._market_makers:
             rewards[mm.agent_id] = mm.compute_reward(self._volatility)
 
+        max_trade_size = max((int(exec.qty) for exec in all_executions), default=0)
+
         # Stage executions so they are processed at the start of the next tick.
         self._pending_executions = list(all_executions)
         self._pending_exec_mid = float(post_action_mid)
 
-        return self._build_info(rewards=rewards)
+        return self._build_info(rewards=rewards, max_trade_size=max_trade_size)
 
     def run(self, seed: Optional[int] = None) -> list[dict]:
         """Run a complete episode and return per-tick info dicts."""
@@ -298,7 +300,11 @@ class FlashCrashSimulation:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_info(self, rewards: Optional[dict[str, float]] = None) -> dict:
+    def _build_info(
+        self,
+        rewards: Optional[dict[str, float]] = None,
+        max_trade_size: int = 0,
+    ) -> dict:
         # Report the pre-MM snapshot depth (post noise/shock), so the
         # reported mid reflects order flow and not quote-refreshing.
         depth = self._last_snapshot_depth or self._lob.get_depth()
@@ -319,6 +325,7 @@ class FlashCrashSimulation:
             "max_abs_inventory": int(max(abs(i) for i in inventories)),
             "rewards": rewards or {},
             "num_shock_orders": len(self._shock_orders_submitted) if self._tick == self._shock_tick else 0,
+            "max_trade_size": int(max_trade_size),
         }
 
     def _inject_shock(self):
