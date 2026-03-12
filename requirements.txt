@@ -87,3 +87,5 @@ urllib3==2.6.3
 wcwidth @ file:///home/conda/feedstock_root/build_artifacts/wcwidth_1770634525285/work
 Werkzeug==3.1.6
 wrapt==2.1.1
+openai==2.26.0
+google-generativeai==0.8.6

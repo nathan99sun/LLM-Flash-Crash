@@ -81,19 +81,72 @@ class FinBERTAgentConfig:
     # Per-agent heterogeneity ranges (drawn uniformly at init)
     confidence_threshold_min: float = 0.55
     confidence_threshold_max: float = 0.85
-    base_qty_min: int = 50
-    base_qty_max: int = 500
+    base_qty_min: int = 10
+    base_qty_max: int = 100
     execution_noise_min: float = 0.9
     execution_noise_max: float = 1.1
 
 
-# @dataclass
-# class LLMAgentConfig:
-#     """Parameters for LLM-based news traders (GPT/Llama via API)."""
+@dataclass
+class LLMAgentConfig:
+    """Parameters for one LLM-backed news trader group.
 
-#     model_name: str = "gpt-4o"
-#     max_quantity: int = 100
-#     temperature: float = 0.2        # low temp for more deterministic output
+    Each instance describes a provider/model pair and how many agents
+    to create with it.  The simulation can hold an arbitrary number of
+    these groups — swap models by editing the list, not the code.
+    """
+
+    num_agents: int = 17
+    provider: str = "openai"            # "openai", "gemini", or any future provider
+    model_name: str = "gpt-4o-mini"
+    api_key_env_var: str = "OPENAI_API_KEY"
+    base_url: str = ""                  # custom endpoint (e.g. "http://localhost:11434/v1" for Ollama)
+    temperature: float = 0.2
+
+    # Per-agent heterogeneity (same knobs as FinBERT for comparable behavior)
+    confidence_threshold_min: float = 0.55
+    confidence_threshold_max: float = 0.85
+    base_qty_min: int = 10
+    base_qty_max: int = 100
+    execution_noise_min: float = 0.9
+    execution_noise_max: float = 1.1
+
+    # Rate-limit retry
+    max_retries: int = 3
+    retry_base_delay: float = 1.0       # seconds; doubles each retry
+
+
+def _default_llm_groups() -> list[LLMAgentConfig]:
+    return [
+        LLMAgentConfig(
+            num_agents=17,
+            provider="openai",
+            model_name="llama3.1:8b",
+            api_key_env_var="OLLAMA_API_KEY",
+            base_url="http://localhost:11434/v1",
+        ),
+        LLMAgentConfig(
+            num_agents=17,
+            provider="openai",
+            model_name="mistral",
+            api_key_env_var="OLLAMA_API_KEY",
+            base_url="http://localhost:11434/v1",
+        ),
+    ]
+
+
+@dataclass
+class NewsTraderPoolConfig:
+    """Configuration for the mixed news-trader pool.
+
+    Combines a fixed FinBERT group with an arbitrary list of LLM groups.
+    To change which models are tested, edit ``llm_groups`` — no code
+    changes required.
+    """
+
+    num_finbert: int = 16
+    finbert: FinBERTAgentConfig = field(default_factory=FinBERTAgentConfig)
+    llm_groups: list[LLMAgentConfig] = field(default_factory=_default_llm_groups)
 
 
 @dataclass
@@ -121,7 +174,7 @@ class MAAMConfig:
     noise_trader: NoiseTraderConfig = field(default_factory=NoiseTraderConfig)
     rl_market_maker: RLMarketMakerConfig = field(default_factory=RLMarketMakerConfig)
     finbert_agent: FinBERTAgentConfig = field(default_factory=FinBERTAgentConfig)
-    # llm_agent: LLMAgentConfig — commented out until LLM agent is implemented
+    news_trader: NewsTraderPoolConfig = field(default_factory=NewsTraderPoolConfig)
     shock: ShockConfig = field(default_factory=ShockConfig)
 
 

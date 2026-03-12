@@ -13,7 +13,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import logging
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
 
 from maam.env import FlashCrashSimulation
 from maam.config import MAAMConfig
@@ -49,7 +49,6 @@ def verify_snapshots(num_ticks: int = 10):
         shock_window=(num_ticks + 10, num_ticks + 20),  # no shock during test
         num_market_makers=50,
         num_noise_traders=50,
-        num_finbert_agents=50,
     )
     sim.reset(seed=42)
 
@@ -111,7 +110,6 @@ def verify_risk_aversion_heterogeneity(seed: int = 42) -> bool:
         episode_length=1,
         num_market_makers=50,
         num_noise_traders=50,
-        num_finbert_agents=20,
     )
     sim.reset(seed=seed)
 
@@ -148,11 +146,10 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
         episode_length=episode_length,
         num_market_makers=50,
         num_noise_traders=50,
-        num_finbert_agents=20,
     )
     info0 = sim.reset(seed=seed)
     print(f"  Shock scheduled at tick {sim.shock_tick}")
-    print(f"  FinBERT agents: {len(sim.finbert_pool.agents)}")
+    print(f"  News traders: {len(sim.news_pool.agents)}")
     print(f"  Market makers:  {len(sim.market_makers)}")
     print()
 
@@ -169,7 +166,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 
         event = ""
         if info["tick"] == sim.shock_tick:
-            event = f"SHOCK ({info['num_shock_orders']}/{len(sim.finbert_pool.agents)} FinBERT sold)"
+            event = f"SHOCK ({info['num_shock_orders']}/{len(sim.news_pool.agents)} news traders sold)"
 
         rewards = info.get("rewards", {})
         mean_rwd = sum(rewards.values()) / max(len(rewards), 1) if rewards else 0.0

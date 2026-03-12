@@ -9,8 +9,8 @@ fresh quotes before deciding its own.
 Execution model per tick:
     1. Process executions collected from the previous tick
     2. Noise traders submit random market orders (exogenous flow)
-    3. FinBERT shock (if this is the shock tick) — heterogeneous agents
-         analyze the headline and submit market orders
+    3. News shock (if this is the shock tick) — heterogeneous FinBERT
+         and LLM agents analyze the headline and submit market orders
     4. Snapshot the LOB — all market makers will observe THIS state
     5. All market makers decide quotes from the cached snapshot
     6. Randomize submission order, apply quotes to the live LOB
@@ -30,7 +30,7 @@ import numpy as np
 from maam.config import MAAMConfig
 from maam.lob import LimitOrderBook, Order, Side, OrderType
 from maam.agents.noise_trader import NoiseTraderPool
-from maam.agents.finbert_agent import FinBERTAgentPool
+from maam.agents.news_trader_pool import NewsTraderPool
 from maam.agents.smart_trader import (
     SmartTrader,
     SmartTraderConfig,
@@ -44,10 +44,10 @@ class FlashCrashSimulation:
     Heuristic-only flash crash simulation with simultaneous observation.
 
     Three agent types:
-      - Noise traders (50): zero-intelligence market orders each tick
-      - Heuristic market makers (50): Avellaneda-Stoikov quoting
-      - FinBERT news traders (50): heterogeneous sentiment-driven agents
-        that react to a news headline at the shock tick
+      - Noise traders: zero-intelligence market orders each tick
+      - Heuristic market makers: Avellaneda-Stoikov quoting
+      - News traders (FinBERT + LLMs): heterogeneous sentiment-driven
+        agents that react to a news headline at the shock tick
 
     Each tick, all market makers observe the same LOB snapshot (taken
     after noise traders and any shock have acted), then submit quotes
@@ -61,7 +61,6 @@ class FlashCrashSimulation:
         shock_window: tuple[int, int] = (400, 700),
         num_market_makers: int = 50,
         num_noise_traders: int = 50,
-        num_finbert_agents: int = 50,
         base_volatility: float = 0.02,
         ewma_alpha: float = 0.05,
         fundamental_sigma: float = 0.1,
@@ -71,7 +70,6 @@ class FlashCrashSimulation:
         self._shock_window = shock_window
         self._num_market_makers = num_market_makers
         self._num_noise_traders = num_noise_traders
-        self._num_finbert_agents = max(1, int(num_finbert_agents))
         self._base_volatility = base_volatility
         self._ewma_alpha = ewma_alpha
         self._fundamental_sigma = fundamental_sigma
@@ -89,7 +87,7 @@ class FlashCrashSimulation:
         self._lob: Optional[LimitOrderBook] = None
         self._market_makers: list[SmartTrader] = []
         self._noise_pool: Optional[NoiseTraderPool] = None
-        self._finbert_pool: Optional[FinBERTAgentPool] = None
+        self._news_pool: Optional[NewsTraderPool] = None
         self._tick: int = 0
         self._shock_tick: int = 0
         self._volatility: float = base_volatility
@@ -129,10 +127,7 @@ class FlashCrashSimulation:
             rng=self._rng,
         )
 
-        self._finbert_pool = FinBERTAgentPool(
-            self._num_finbert_agents,
-            self._config.finbert_agent,
-        )
+        self._news_pool = NewsTraderPool(self._config.news_trader)
 
         self._tick = 0
         self._volatility = self._base_volatility
@@ -175,7 +170,7 @@ class FlashCrashSimulation:
         Execution order:
           1. Process executions collected from prior tick
           2. Noise traders (exogenous market orders)
-          3. FinBERT shock (if applicable) — heterogeneous news traders
+          3. News shock (if applicable) — heterogeneous news traders
           4. Snapshot LOB for all market makers
           5. All MMs decide from snapshot, submit in randomized order
           6. Collect executions and compute rewards
@@ -204,7 +199,7 @@ class FlashCrashSimulation:
         # --- 1b. Evolve fundamental price (exogenous random walk) ---
         self._fundamental_price += self._rng.normal(0, self._fundamental_sigma)
 
-        # --- 2. FinBERT shock ---
+        # --- 2. News shock ---
         if self._tick == self._shock_tick:
             self._inject_shock()
 
@@ -285,8 +280,8 @@ class FlashCrashSimulation:
         return self._market_makers
 
     @property
-    def finbert_pool(self) -> Optional[FinBERTAgentPool]:
-        return self._finbert_pool
+    def news_pool(self) -> Optional[NewsTraderPool]:
+        return self._news_pool
 
     @property
     def lob(self) -> LimitOrderBook:
@@ -330,14 +325,14 @@ class FlashCrashSimulation:
 
     def _inject_shock(self):
         """
-        FinBERT-driven shock: all FinBERT agents analyze the headline
-        and independently decide whether to trade.
+        News-trader shock: all news traders (FinBERT + LLMs) analyze the
+        headline and independently decide whether to trade.
         """
-        if self._finbert_pool is None or len(self._finbert_pool.agents) == 0:
-            raise RuntimeError("FinBERT pool is empty at shock tick; expected at least one FinBERT agent")
+        if self._news_pool is None or len(self._news_pool.agents) == 0:
+            raise RuntimeError("News trader pool is empty at shock tick; expected at least one agent")
 
         headline = self._config.shock.headline
-        self._shock_orders_submitted = self._finbert_pool.react_to_news(headline, self._lob)
+        self._shock_orders_submitted = self._news_pool.react_to_news(headline, self._lob)
 
         self._fundamental_price -= float(self._config.shock.fundamental_drop)
 
