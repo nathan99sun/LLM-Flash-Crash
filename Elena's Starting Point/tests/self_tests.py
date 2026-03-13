@@ -155,11 +155,14 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 
     header = (
         f"{'Tick':>6s} | {'Mid':>9s} | {'FundP':>9s} | {'Spread':>7s} | {'BidD':>7s} | "
-        f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | {'MaxSize':>7s} | "
+        f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | {'SmartVol':>8s} | {'NoiseVol':>8s} | "
         f"{'MeanRwd':>9s} | {'Event':s}"
     )
     print(header)
     print("-" * len(header))
+
+    smart_ids = {mm.agent_id for mm in sim.market_makers}
+    noise_ids = {trader.agent_id for trader in sim._noise_pool.traders}
 
     for _ in range(episode_length):
         info = sim.step()
@@ -171,6 +174,19 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
         rewards = info.get("rewards", {})
         mean_rwd = sum(rewards.values()) / max(len(rewards), 1) if rewards else 0.0
 
+        tick_executions = sim.lob.get_tick_executions()
+        smart_trader_volume = 0
+        noise_trader_volume = 0
+        for exec in tick_executions:
+            if exec.buyer_id in smart_ids:
+                smart_trader_volume += int(exec.qty)
+            if exec.seller_id in smart_ids:
+                smart_trader_volume += int(exec.qty)
+            if exec.buyer_id in noise_ids:
+                noise_trader_volume += int(exec.qty)
+            if exec.seller_id in noise_ids:
+                noise_trader_volume += int(exec.qty)
+
         mid_str = f"{info['mid_price']:9.2f}" if info["mid_price"] is not None else "     None"
         fund_str = f"{info['fundamental_price']:9.2f}"
         spread_str = f"{info['spread']:7.2f}" if info["spread"] is not None else "   None"
@@ -179,7 +195,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
             f"{info['tick']:6d} | {mid_str} | {fund_str} | {spread_str} | "
             f"{info['bid_depth']:7d} | {info['ask_depth']:7d} | "
             f"{info['volatility']:8.4f} | {info['mean_inventory']:8.2f} | "
-            f"{info['max_abs_inventory']:7d} | {info.get('max_trade_size', 0):7d} | {mean_rwd:9.4f} | {event}"
+            f"{info['max_abs_inventory']:7d} | {smart_trader_volume:8d} | {noise_trader_volume:8d} | {mean_rwd:9.4f} | {event}"
         )
 
     print()
