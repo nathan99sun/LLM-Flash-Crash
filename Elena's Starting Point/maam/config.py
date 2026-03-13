@@ -81,7 +81,7 @@ class FinBERTAgentConfig:
     # Per-agent heterogeneity ranges (drawn uniformly at init)
     confidence_threshold_min: float = 0.55
     confidence_threshold_max: float = 0.85
-    base_qty_min: int = 10
+    base_qty_min: int = 50
     base_qty_max: int = 100
     execution_noise_min: float = 0.9
     execution_noise_max: float = 1.1
@@ -106,7 +106,7 @@ class LLMAgentConfig:
     # Per-agent heterogeneity (same knobs as FinBERT for comparable behavior)
     confidence_threshold_min: float = 0.55
     confidence_threshold_max: float = 0.85
-    base_qty_min: int = 10
+    base_qty_min: int = 50
     base_qty_max: int = 100
     execution_noise_min: float = 0.9
     execution_noise_max: float = 1.1
@@ -119,14 +119,14 @@ class LLMAgentConfig:
 def _default_llm_groups() -> list[LLMAgentConfig]:
     return [
         LLMAgentConfig(
-            num_agents=17,
+            num_agents=1,
             provider="openai",
             model_name="llama3.1:8b",
             api_key_env_var="OLLAMA_API_KEY",
             base_url="http://localhost:11434/v1",
         ),
         LLMAgentConfig(
-            num_agents=17,
+            num_agents=1,
             provider="openai",
             model_name="mistral",
             api_key_env_var="OLLAMA_API_KEY",
@@ -144,7 +144,7 @@ class NewsTraderPoolConfig:
     changes required.
     """
 
-    num_finbert: int = 16
+    num_finbert: int = 48
     finbert: FinBERTAgentConfig = field(default_factory=FinBERTAgentConfig)
     llm_groups: list[LLMAgentConfig] = field(default_factory=_default_llm_groups)
 

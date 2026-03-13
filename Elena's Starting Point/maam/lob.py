@@ -166,18 +166,13 @@ class LimitOrderBook:
     def get_mid_price(self) -> Optional[float]:
         """
         Mid-price = (best_bid + best_ask) / 2.
-        Returns None if either side is empty.
-        Falls back to last trade price if one side is empty.
+        Falls back to last trade price when either or both sides are empty.
         """
         best_bid = self._bids[0].price if self._bids else None
         best_ask = self._asks[0].price if self._asks else None
 
         if best_bid is not None and best_ask is not None:
             return round((best_bid + best_ask) / 2, 6)
-        if best_bid is not None:
-            return best_bid
-        if best_ask is not None:
-            return best_ask
         return self._last_trade_price
 
     def get_spread(self) -> Optional[float]:

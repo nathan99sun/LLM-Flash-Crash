@@ -15,6 +15,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import logging
 logging.basicConfig(level=logging.INFO)
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from maam.env import FlashCrashSimulation
 from maam.config import MAAMConfig
 
@@ -24,7 +28,7 @@ def _dynamic_test_config() -> MAAMConfig:
     cfg = MAAMConfig()
     cfg.noise_trader.arrival_rate = 10.0
     cfg.noise_trader.min_qty = 10
-    cfg.noise_trader.max_qty = 50
+    cfg.noise_trader.max_qty = 90
     return cfg
 
 
@@ -135,6 +139,7 @@ def verify_risk_aversion_heterogeneity(seed: int = 42) -> bool:
 def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     """
     Run a complete episode and print one line per tick with key metrics.
+    Returns (sim, history) so callers can plot the results.
     """
     print("=" * 70)
     print("PART 2: Full Simulation Loop")
@@ -147,7 +152,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
         num_market_makers=50,
         num_noise_traders=50,
     )
-    info0 = sim.reset(seed=seed)
+    sim.reset(seed=seed)
     print(f"  Shock scheduled at tick {sim.shock_tick}")
     print(f"  News traders: {len(sim.news_pool.agents)}")
     print(f"  Market makers:  {len(sim.market_makers)}")
@@ -161,8 +166,10 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     print(header)
     print("-" * len(header))
 
+    history = []
     for _ in range(episode_length):
         info = sim.step()
+        history.append(info)
 
         event = ""
         if info["tick"] == sim.shock_tick:
@@ -190,6 +197,69 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     print(f"  Final max |inv|:       {info['max_abs_inventory']}")
     print()
 
+    return sim, history
+
+
+# ======================================================================
+# Part 3: Plot results
+# ======================================================================
+
+def plot_results(sim: FlashCrashSimulation, history: list[dict]):
+    """Generate a 5-panel plot from simulation history and save to file."""
+    print("=" * 70)
+    print("PART 3: Generating Plot")
+    print("=" * 70)
+
+    ticks = [h["tick"] for h in history]
+    mids = [h["mid_price"] or float("nan") for h in history]
+    funds = [h["fundamental_price"] for h in history]
+    spreads = [h["spread"] or float("nan") for h in history]
+    vols = [h["volatility"] for h in history]
+    bid_depths = [h["bid_depth"] for h in history]
+    ask_depths = [h["ask_depth"] for h in history]
+    mean_invs = [h["mean_inventory"] for h in history]
+    shock = sim.shock_tick
+    num_news = len(sim.news_pool.agents)
+    shock_orders = next(
+        (h["num_shock_orders"] for h in history if h["tick"] == shock), 0
+    )
+
+    fig, axes = plt.subplots(5, 1, figsize=(14, 14), sharex=True)
+
+    axes[0].plot(ticks, mids, label="Mid Price", linewidth=0.8)
+    axes[0].plot(ticks, funds, label="Fundamental", linewidth=0.8, linestyle="--")
+    axes[0].axvline(shock, color="red", linestyle=":", alpha=0.7,
+                    label=f"Shock (t={shock}, {shock_orders}/{num_news} sold)")
+    axes[0].set_ylabel("Price")
+    axes[0].legend()
+    axes[0].set_title("Flash Crash Simulation")
+
+    axes[1].plot(ticks, spreads, linewidth=0.8, color="orange")
+    axes[1].axvline(shock, color="red", linestyle=":", alpha=0.7)
+    axes[1].set_ylabel("Spread")
+
+    axes[2].plot(ticks, bid_depths, label="Bid Depth", linewidth=0.8, color="green")
+    axes[2].plot(ticks, ask_depths, label="Ask Depth", linewidth=0.8, color="purple")
+    axes[2].axvline(shock, color="red", linestyle=":", alpha=0.7)
+    axes[2].set_ylabel("Depth (shares)")
+    axes[2].legend()
+
+    axes[3].plot(ticks, vols, linewidth=0.8, color="teal")
+    axes[3].axvline(shock, color="red", linestyle=":", alpha=0.7)
+    axes[3].set_ylabel("Volatility")
+
+    axes[4].plot(ticks, mean_invs, linewidth=0.8, color="brown")
+    axes[4].axvline(shock, color="red", linestyle=":", alpha=0.7)
+    axes[4].set_ylabel("Mean MM Inventory")
+    axes[4].set_xlabel("Tick")
+
+    fig.tight_layout()
+    out_path = os.path.join(os.path.dirname(__file__), "..", "flash_crash_plot.png")
+    plt.savefig(out_path, dpi=150)
+    print(f"  Plot saved to {os.path.abspath(out_path)}")
+    plt.show()
+    print()
+
 
 # ======================================================================
 # Main
@@ -203,4 +273,5 @@ if __name__ == "__main__":
         print("Stopped before Part 2 because MM risk aversion is homogeneous.")
         sys.exit(0)
 
-    run_full_simulation(episode_length=1000, seed=42)
+    sim, history = run_full_simulation(episode_length=1000, seed=42)
+    plot_results(sim, history)
