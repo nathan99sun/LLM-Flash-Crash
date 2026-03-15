@@ -20,15 +20,86 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from maam.env import FlashCrashSimulation
-from maam.config import MAAMConfig
+from maam.config import (
+    MAAMConfig,
+    FinBERTAgentConfig,
+    LLMAgentConfig,
+    NewsTraderPoolConfig,
+)
+from maam.agents.smart_trader import SmartTraderConfig  # add: to control inventory_limit, etc.
 
 
 def _dynamic_test_config() -> MAAMConfig:
     """Config close to defaults; avoid overwhelming the book pre-shock."""
     cfg = MAAMConfig()
     cfg.noise_trader.arrival_rate = 10.0
-    cfg.noise_trader.min_qty = 10
-    cfg.noise_trader.max_qty = 90
+    cfg.noise_trader.min_qty = 1
+    cfg.noise_trader.max_qty = 10
+
+    # Controls requested:
+    # 1) EWMA lambda (volatility smoothing)
+    cfg.simulation.vol_ewma_lambda = 0.1 # increase for slower adaptation; decrease for faster
+
+    # 2) Shock volatility multiplier (x5 etc.)
+    cfg.shock.post_shock_volatility_multiplier = 1.0
+
+    # 3) Inventory limit (used by SmartTrader market makers in FlashCrashSimulation)
+    # FlashCrashSimulation reads cfg.smart_trader if present.
+    cfg.smart_trader = SmartTraderConfig(inventory_limit=100)
+
+    # --- News trader quantities + per-agent behavior knobs (tweak here) ---
+    finbert_cfg = FinBERTAgentConfig(
+        model_name=cfg.finbert_agent.model_name,
+        confidence_threshold_min=0.55,
+        confidence_threshold_max=0.85,
+        base_qty_min=5,
+        base_qty_max=10,
+        execution_noise_min=0.9,
+        execution_noise_max=1.1,
+    )
+
+    llm_groups = [
+        LLMAgentConfig(
+            num_agents=2,  # <-- LLM agent count (group 1)
+            provider="openai",
+            model_name="llama3.1:8b",
+            api_key_env_var="OLLAMA_API_KEY",
+            base_url="http://localhost:11434/v1",
+            temperature=0.2,
+            confidence_threshold_min=0.55,
+            confidence_threshold_max=0.85,
+            base_qty_min=5,
+            base_qty_max=10,
+            execution_noise_min=0.9,
+            execution_noise_max=1.1,
+        ),
+        LLMAgentConfig(
+            num_agents=2,  # <-- LLM agent count (group 2)
+            provider="openai",
+            model_name="mistral",
+            api_key_env_var="OLLAMA_API_KEY",
+            base_url="http://localhost:11434/v1",
+            temperature=0.2,
+            confidence_threshold_min=0.55,
+            confidence_threshold_max=0.85,
+            base_qty_min=5,
+            base_qty_max=10,
+            execution_noise_min=0.9,
+            execution_noise_max=1.1,
+        ),
+    ]
+
+    cfg.news_trader = NewsTraderPoolConfig(
+        num_finbert=48,   # <-- FinBERT agent count
+        finbert=finbert_cfg,
+        llm_groups=llm_groups,
+    )
+
+    # Optional: keep the top-level counter consistent (if you look at it elsewhere)
+    cfg.simulation.num_news_traders = int(
+        cfg.news_trader.num_finbert + sum(g.num_agents for g in cfg.news_trader.llm_groups)
+    )
+
     return cfg
 
 
@@ -159,7 +230,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     print()
 
     header = (
-        f"{'Tick':>6s} | {'Mid':>9s} | {'FundP':>9s} | {'Spread':>7s} | {'BidD':>7s} | "
+        f"{'Tick':>6s} | {'Mid':>9s} | {'FundP':>9s} | {'Spread':>7s} | {'MM0Spr':>7s} | {'BidD':>7s} | "
         f"{'AskD':>7s} | {'Vol':>8s} | {'MeanInv':>8s} | {'MaxInv':>7s} | {'MaxSize':>7s} | "
         f"{'MeanRwd':>9s} | {'Event':s}"
     )
@@ -170,6 +241,17 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
     for _ in range(episode_length):
         info = sim.step()
         history.append(info)
+
+        # add: MM_0 quoted spread (ask - bid) from its last submitted quotes
+        mm0_spr = None
+        if sim.market_makers:
+            mm0 = sim.market_makers[0]
+            act = getattr(mm0, "last_quote_action", None)
+            act = act() if callable(act) else act
+            if act is not None:
+                mm0_spr = float(act.ask_price) - float(act.bid_price)
+
+        mm0spr_str = f"{mm0_spr:7.2f}" if mm0_spr is not None else "   None"
 
         event = ""
         if info["tick"] == sim.shock_tick:
@@ -183,7 +265,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
         spread_str = f"{info['spread']:7.2f}" if info["spread"] is not None else "   None"
 
         print(
-            f"{info['tick']:6d} | {mid_str} | {fund_str} | {spread_str} | "
+            f"{info['tick']:6d} | {mid_str} | {fund_str} | {spread_str} | {mm0spr_str} | "
             f"{info['bid_depth']:7d} | {info['ask_depth']:7d} | "
             f"{info['volatility']:8.4f} | {info['mean_inventory']:8.2f} | "
             f"{info['max_abs_inventory']:7d} | {info.get('max_trade_size', 0):7d} | {mean_rwd:9.4f} | {event}"

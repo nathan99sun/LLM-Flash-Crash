@@ -1,4 +1,3 @@
-
 """SmartTrader — quotes a bid/ask spread from Avellaneda–Stoikov Eq. (3.18).
 
 We use Eq. (3.18) from the Cornell limit order book notes to compute the
@@ -41,13 +40,13 @@ class SmartTraderConfig:
 	# Avellaneda–Stoikov parameters
 	# Per-agent risk aversion (γ). In the simulation, this can be overridden
 	# per agent by sampling from the lognormal distribution parameters below.
-	risk_aversion: float = 0.01
+	risk_aversion: float = 0.05
 	liquidity_k: float = 1.5     # k
 
 	# Heterogeneity: draw each agent's γ from LogNormal(mu, sigma)
 	# where mu/sigma are the parameters of the underlying Normal.
 	sample_risk_aversion_lognormal: bool = True
-	risk_aversion_lognorm_mu: float = math.log(0.01)
+	risk_aversion_lognorm_mu: float = math.log(0.05)
 	risk_aversion_lognorm_sigma: float = 0.5
 	risk_aversion_min: float = 1e-4
 	risk_aversion_max: float = 1.0
@@ -58,7 +57,7 @@ class SmartTraderConfig:
 
 	# Portfolio / quoting controls
 	initial_cash: float = 100_000.0
-	base_quote_qty: int = 50
+	base_quote_qty: int = 5
 	inventory_limit: int = 100
 	breach_penalty: float = 500.0
 
@@ -123,6 +122,8 @@ class SmartTrader:
 		self._total_reward: float = 0.0
 		self._step_count: int = 0
 
+		self._last_quote_action: Optional[QuoteAction] = None  # add
+
 	@property
 	def portfolio_value(self) -> float:
 		return self.cash + self.inventory * self._last_mid_price
@@ -130,6 +131,10 @@ class SmartTrader:
 	@property
 	def total_pnl(self) -> float:
 		return self.portfolio_value - self.config.initial_cash
+
+	@property
+	def last_quote_action(self) -> Optional[QuoteAction]:
+		return self._last_quote_action
 
 	# ------------------------------------------------------------------
 	# Core loop helpers
@@ -204,6 +209,9 @@ class SmartTrader:
 		)
 
 	def submit_quotes(self, action: QuoteAction, lob: LimitOrderBook) -> list[Order]:
+		# add: remember what we attempted to quote this tick
+		self._last_quote_action = action
+
 		if action.cancel_existing:
 			lob.cancel_all_by_agent(self.agent_id)
 

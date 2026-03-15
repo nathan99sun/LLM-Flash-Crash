@@ -28,7 +28,7 @@ class SimulationConfig:
     # --- Volatility estimation ---
     # EWMA parameter for return variance: v_t = λ v_{t-1} + (1-λ) r_t^2
     # Larger λ => slower adaptation.
-    vol_ewma_lambda: float = 0.97
+    vol_ewma_lambda: float = 0.1
 
     # --- Agent populations ---
     num_noise_traders: int = 50
@@ -60,7 +60,7 @@ class RLMarketMakerConfig:
     # Quoting behavior
     initial_cash: float = 100_000.0
     num_quote_levels: int = 3       # how many price levels to quote on each side
-    base_quote_qty: int = 50        # base quantity per quote level
+    base_quote_qty: int = 5        # base quantity per quote level
     max_spread_offset: float = 2.0  # max distance from mid-price for quotes (in ticks)
 
     # PPO training
@@ -158,7 +158,7 @@ class ShockConfig:
         "points, citing persistent, entrenched inflation. Equity markets "
         "expected to face severe headwinds."
     )
-    post_shock_volatility_multiplier: float = 5.0
+    post_shock_volatility_multiplier: float = 1.0
     fundamental_drop: float = 2.0           # permanent downward shift in fundamental value
 
 
