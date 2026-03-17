@@ -248,7 +248,7 @@ class FlashCrashSimulation:
         self._pending_executions = list(all_executions)
         self._pending_exec_mid = float(post_action_mid)
 
-        return self._build_info(rewards=rewards, max_trade_size=max_trade_size)
+        return self._build_info(rewards=rewards, max_trade_size=max_trade_size, actions=actions)
 
     def run(self, seed: Optional[int] = None) -> list[dict]:
         """Run a complete episode and return per-tick info dicts."""
@@ -299,11 +299,21 @@ class FlashCrashSimulation:
         self,
         rewards: Optional[dict[str, float]] = None,
         max_trade_size: int = 0,
+        actions: Optional[dict[str, QuoteAction]] = None,
     ) -> dict:
         # Report the pre-MM snapshot depth (post noise/shock), so the
         # reported mid reflects order flow and not quote-refreshing.
         depth = self._last_snapshot_depth or self._lob.get_depth()
         inventories = [mm.inventory for mm in self._market_makers]
+
+        mm0_action = (actions or {}).get("MM_0")
+        mm0_bid = mm0_action.bid_price if mm0_action else None
+        mm0_ask = mm0_action.ask_price if mm0_action else None
+        mm0_inv = next(
+            (mm.inventory for mm in self._market_makers if mm.agent_id == "MM_0"),
+            0,
+        )
+
         return {
             "tick": self._tick,
             "shock_tick": self._shock_tick,
@@ -321,6 +331,9 @@ class FlashCrashSimulation:
             "rewards": rewards or {},
             "num_shock_orders": len(self._shock_orders_submitted) if self._tick == self._shock_tick else 0,
             "max_trade_size": int(max_trade_size),
+            "mm0_bid_price": mm0_bid,
+            "mm0_ask_price": mm0_ask,
+            "mm0_inventory": mm0_inv,
         }
 
     def _inject_shock(self):

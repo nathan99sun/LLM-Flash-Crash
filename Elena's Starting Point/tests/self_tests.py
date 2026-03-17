@@ -60,7 +60,7 @@ def _dynamic_test_config() -> MAAMConfig:
 
     llm_groups = [
         LLMAgentConfig(
-            num_agents=2,  # <-- LLM agent count (group 1)
+            num_agents=17,  # <-- LLM agent count (group 1)
             provider="openai",
             model_name="llama3.1:8b",
             api_key_env_var="OLLAMA_API_KEY",
@@ -74,7 +74,7 @@ def _dynamic_test_config() -> MAAMConfig:
             execution_noise_max=1.1,
         ),
         LLMAgentConfig(
-            num_agents=2,  # <-- LLM agent count (group 2)
+            num_agents=17,  # <-- LLM agent count (group 2)
             provider="openai",
             model_name="mistral",
             api_key_env_var="OLLAMA_API_KEY",
@@ -90,7 +90,7 @@ def _dynamic_test_config() -> MAAMConfig:
     ]
 
     cfg.news_trader = NewsTraderPoolConfig(
-        num_finbert=48,   # <-- FinBERT agent count
+        num_finbert=16,   # <-- FinBERT agent count
         finbert=finbert_cfg,
         llm_groups=llm_groups,
     )
@@ -287,7 +287,7 @@ def run_full_simulation(episode_length: int = 1000, seed: int = 42):
 # ======================================================================
 
 def plot_results(sim: FlashCrashSimulation, history: list[dict]):
-    """Generate a 5-panel plot from simulation history and save to file."""
+    """Generate a 6-panel plot from simulation history and save to file."""
     print("=" * 70)
     print("PART 3: Generating Plot")
     print("=" * 70)
@@ -300,18 +300,28 @@ def plot_results(sim: FlashCrashSimulation, history: list[dict]):
     bid_depths = [h["bid_depth"] for h in history]
     ask_depths = [h["ask_depth"] for h in history]
     mean_invs = [h["mean_inventory"] for h in history]
+    mm0_bids = [h.get("mm0_bid_price") or float("nan") for h in history]
+    mm0_asks = [h.get("mm0_ask_price") or float("nan") for h in history]
     shock = sim.shock_tick
     num_news = len(sim.news_pool.agents)
     shock_orders = next(
         (h["num_shock_orders"] for h in history if h["tick"] == shock), 0
     )
 
-    fig, axes = plt.subplots(5, 1, figsize=(14, 14), sharex=True)
+    fig, axes = plt.subplots(6, 1, figsize=(14, 17), sharex=True)
+
+    import math
 
     axes[0].plot(ticks, mids, label="Mid Price", linewidth=0.8)
     axes[0].plot(ticks, funds, label="Fundamental", linewidth=0.8, linestyle="--")
     axes[0].axvline(shock, color="red", linestyle=":", alpha=0.7,
                     label=f"Shock (t={shock}, {shock_orders}/{num_news} sold)")
+
+    shock_idx = ticks.index(shock) if shock in ticks else None
+    if shock_idx is not None:
+        pre_idx = shock_idx - 1 if shock_idx > 0 else shock_idx
+        post_idx = shock_idx + 1 if shock_idx < len(ticks) - 1 else shock_idx
+
     axes[0].set_ylabel("Price")
     axes[0].legend()
     axes[0].set_title("Flash Crash Simulation")
@@ -333,12 +343,77 @@ def plot_results(sim: FlashCrashSimulation, history: list[dict]):
     axes[4].plot(ticks, mean_invs, linewidth=0.8, color="brown")
     axes[4].axvline(shock, color="red", linestyle=":", alpha=0.7)
     axes[4].set_ylabel("Mean MM Inventory")
-    axes[4].set_xlabel("Tick")
+
+    axes[5].plot(ticks, mm0_asks, label="MM_0 Ask", linewidth=0.8, color="red")
+    axes[5].plot(ticks, mids, label="Mid Price", linewidth=0.6, color="gray", alpha=0.5)
+    axes[5].plot(ticks, mm0_bids, label="MM_0 Bid", linewidth=0.8, color="blue")
+    axes[5].fill_between(ticks, mm0_bids, mm0_asks, alpha=0.15, color="purple",
+                         label="MM_0 Spread")
+    axes[5].axvline(shock, color="red", linestyle=":", alpha=0.7)
+
+    if shock_idx is not None:
+        for idx, label_prefix in [(pre_idx, "Pre"), (post_idx, "Post")]:
+            bid_v, ask_v = mm0_bids[idx], mm0_asks[idx]
+            if not (math.isnan(bid_v) or math.isnan(ask_v)):
+                spread_v = ask_v - bid_v
+                mid_y = (ask_v + bid_v) / 2
+                axes[5].annotate(
+                    f"{label_prefix} spread={spread_v:.2f}",
+                    xy=(ticks[idx], mid_y),
+                    xytext=(-80 if label_prefix == "Pre" else 40,
+                            30 if label_prefix == "Pre" else -30),
+                    textcoords="offset points", fontsize=8, ha="center",
+                    arrowprops=dict(arrowstyle="->", color="black", lw=0.8),
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.9))
+
+    axes[5].set_ylabel("MM_0 Bid / Ask")
+    axes[5].set_xlabel("Tick")
+    axes[5].legend(loc="lower left")
 
     fig.tight_layout()
     out_path = os.path.join(os.path.dirname(__file__), "..", "flash_crash_plot.png")
     plt.savefig(out_path, dpi=150)
     print(f"  Plot saved to {os.path.abspath(out_path)}")
+    plt.show()
+    print()
+
+
+def plot_zoomed_shock(sim: FlashCrashSimulation, history: list[dict], window: int = 30):
+    """Zoomed-in single-panel plot of mid/fundamental price around the shock."""
+    print("=" * 70)
+    print("PART 4: Generating Zoomed Shock Plot")
+    print("=" * 70)
+
+    shock = sim.shock_tick
+    ticks = [h["tick"] for h in history]
+
+    shock_idx = ticks.index(shock) if shock in ticks else None
+    if shock_idx is None:
+        print("  Shock tick not found in history — skipping zoom plot.")
+        return
+
+    lo = max(0, shock_idx - window)
+    hi = min(len(history), shock_idx + window + 1)
+    zoom = history[lo:hi]
+
+    zt = [h["tick"] for h in zoom]
+    z_mids = [h["mid_price"] or float("nan") for h in zoom]
+    z_funds = [h["fundamental_price"] for h in zoom]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    ax.plot(zt, z_mids, label="Mid Price", linewidth=1.2, color="tab:blue")
+    ax.plot(zt, z_funds, label="Fundamental", linewidth=1.2, linestyle="--", color="tab:orange")
+    ax.axvline(shock, color="red", linestyle=":", alpha=0.7, label=f"Shock (t={shock})")
+    ax.set_ylabel("Price")
+    ax.set_xlabel("Tick")
+    ax.legend()
+    ax.set_title(f"Zoomed View: ±{window} Ticks Around Shock")
+
+    fig.tight_layout()
+    out_path = os.path.join(os.path.dirname(__file__), "..", "flash_crash_zoom.png")
+    plt.savefig(out_path, dpi=150)
+    print(f"  Zoom plot saved to {os.path.abspath(out_path)}")
     plt.show()
     print()
 
@@ -357,3 +432,4 @@ if __name__ == "__main__":
 
     sim, history = run_full_simulation(episode_length=1000, seed=42)
     plot_results(sim, history)
+    plot_zoomed_shock(sim, history)
